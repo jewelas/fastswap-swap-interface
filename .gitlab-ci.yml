@@ -1,0 +1,137 @@
+---
+stages:
+  - build
+  - deploy
+
+
+variables:
+  FF_USE_FASTZIP: "true"
+  ARTIFACT_COMPRESSION_LEVEL: fastest # fastest, fast, slow and slowest.
+  CACHE_COMPRESSION_LEVEL: fast
+  TRANSFER_METER_FREQUENCY: 1s
+
+  user: root
+  artifact_name: build.tar.gz
+  project_dir: /var/www/html/fastswap-swap-interface
+  uikit_url: git.sfxdx.ru/fastswap/fastswap-uikit
+  sdk_url: git.sfxdx.ru/fastswap/fastswap-sdk
+
+
+# cache template
+.vars_cache:
+  cache:
+    key: node-cache
+    paths:
+      - .yarn
+      - node_modules/
+      - 'packages/*/node_modules'
+    policy: pull-push
+
+
+
+
+.vars_master:
+  variables:
+    target: 18.132.68.60
+    branch: master
+    build_env: .env.development
+    build_command: build-test
+
+.vars_mainnet:
+  variables:
+    target: 18.133.119.1
+    branch: mainnet
+    build_env: .env.production
+    build_command: build-mainnet
+
+# build template
+.build:
+  stage: build
+  image: node:12.21.0-alpine3.11
+  before_script:
+    - apk add git openssl
+    - git config --global
+        url.https://$UIKIT_TOKEN@$uikit_url.insteadOf
+        https://$uikit_url
+    - git config --global
+        url.https://$SDK_TOKEN@$sdk_url.insteadOf
+        https://$sdk_url
+  script:
+    - cat $build_env > .env && cat .env > .env.production
+    - yarn install
+    - CI=false yarn $build_command
+    - tar -czf build.tar.gz build
+  artifacts:
+    paths:
+      - build.tar.gz
+    expire_in: 1 day
+  tags:
+    - build
+
+# deploy template
+.deploy:
+  stage: deploy
+  image: bash:5.1.4
+  before_script:
+    - set -eu
+    - shopt -s expand_aliases
+    - apk add openssh-client
+    - eval `ssh-agent -s`
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - alias run_="ssh -o StrictHostKeyChecking=no  $user@$target"
+    - alias copy_="scp -o StrictHostKeyChecking=no"
+  script:
+    - echo "#Create project directory if not exist"
+    - run_ "mkdir -p $project_dir"
+
+    - echo "#Copy artifact to remote instance"
+    - copy_ $artifact_name $user@$target:$project_dir/$artifact_name
+
+    - echo "#Remove old frontend files"
+    - run_ "rm -rf $project_dir/build"
+
+    - echo "#Unpack artifact to www dir"
+    - run_ "tar -xzf $project_dir/$artifact_name -C $project_dir"
+
+    - echo "#Change project directory owner"
+    - run_ "chown -R www-data:www-data $project_dir"
+
+    - echo "#Cleanup unwanted artifacts files"
+    - run_ "rm -rf $project_dir/$artifact_name"
+  tags:
+    - deploy
+
+
+# master branch
+build_master:
+  extends:
+    - .vars_cache
+    - .vars_master
+    - .build
+  only:
+    - master
+
+deploy_master:
+  extends:
+    - .vars_master
+    - .deploy
+  only:
+    - master
+  allow_failure: false
+
+
+# mainnet branch
+build_mainnet:
+  extends:
+    - .vars_cache
+    - .vars_mainnet
+    - .build
+  only:
+    - mainnet
+
+deploy_mainnet:
+  extends:
+    - .vars_mainnet
+    - .deploy
+  only:
+    - mainnet
